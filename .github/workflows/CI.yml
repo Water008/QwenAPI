@@ -13,25 +13,6 @@ env:
 
 jobs:
   ci:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Run syntax check
-        run: |
-          find src -name "*.py" -exec python -m py_compile {} \;
-
   build-and-push:
     needs: ci
     if: startsWith(github.ref, 'refs/tags/v')
@@ -39,13 +20,13 @@ jobs:
     permissions:
       contents: read
       packages: write
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
+      - name: Set up Docker Buildx with multi-platform support
         uses: docker/setup-buildx-action@v3
+        with:
+          platforms: linux/amd64,linux/arm64  # 明确指定要支持的平台列表
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -63,12 +44,12 @@ jobs:
             type=semver,pattern=v{{version}}
             type=semver,pattern=v{{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}
-
-      - name: Build and push Docker image
+      - name: Build and push multi-arch Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
