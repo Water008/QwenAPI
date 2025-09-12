@@ -7,7 +7,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from src.config.settings import PORT, HOST, DEBUG
+from src.config.settings import PORT, HOST, DEBUG, LOG_LEVEL
 from src.api import api_router, openai_router
 from src.web import web_router
 from src.oauth import TokenManager
@@ -16,7 +16,8 @@ from src.utils.version_manager import initialize_version_manager, get_version_ma
 from src.utils import initialize_tools
 
 # 设置日志
-logging.basicConfig(level=logging.INFO)
+log_level = getattr(logging, LOG_LEVEL.upper(), logging.INFO)
+logging.basicConfig(level=log_level)
 logger = logging.getLogger(__name__)
 
 # 全局变量
@@ -58,32 +59,45 @@ async def lifespan(app: FastAPI):
             pass
 
 async def auto_refresh_tokens():
-    refresh_interval = int(os.getenv('TOKEN_REFRESH_INTERVAL', '14400'))
+    # 每60秒检查一次token是否需要刷新
+    refresh_interval = 60
+    
+    logger.info("启动自动刷新任务")
+    # 获取版本管理器实例
+    version_manager = get_version_manager()
     
     while True:
         try:
+            logger.debug(f"开始执行token刷新检查，间隔: {refresh_interval}秒")
             await asyncio.sleep(refresh_interval)
             
             try:
-                version_manager = get_version_manager()
-                await version_manager.refresh_version()
+                version = await version_manager.get_version()
+                logger.debug(f"当前版本: {version}")
             except Exception as e:
+                logger.error(f"获取版本失败: {e}", exc_info=True)
                 pass
             
+            logger.debug("加载token存储")
             _token_manager.load_tokens()
+            # 设置版本管理器以确保User-Agent正确
+            _token_manager.set_version_manager(version_manager)
+            
             if _token_manager.token_store:
-                result = await _token_manager.refresh_all_tokens()
-                
-                success_count = sum(1 for r in result['refreshResults'] if r['success'])
-                total_count = len(result['refreshResults'])
-                
+                logger.debug(f"发现 {len(_token_manager.token_store)} 个token，开始检查是否需要刷新")
+                # 检查并刷新即将过期的token（在过期前2小时刷新）
+                result = await _token_manager.refresh_expiring_tokens()
+                logger.debug(f"Token刷新检查完成: {result}")
             else:
-                pass
+                logger.debug("没有可用的token")
                 
         except asyncio.CancelledError:
+            logger.info("Token自动刷新任务已取消")
             break
         except Exception as e:
-            await asyncio.sleep(300)
+            logger.error(f"Token刷新过程中发生错误: {e}", exc_info=True)
+            # 减少等待时间，以便更快重试
+            await asyncio.sleep(60)
 
 app = FastAPI(title="Qwen Code API Server", lifespan=lifespan)
 

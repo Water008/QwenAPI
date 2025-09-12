@@ -32,4 +32,4 @@ HEALTHCHECK --interval=600s --timeout=10s --start-period=40s --retries=3 CMD cur
 EXPOSE 8000
 
 # 使用优化的启动命令
-CMD ["python", "-m", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "info"]
+CMD ["python", "-m", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]

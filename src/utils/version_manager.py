@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 class VersionManager:
     
-    REGISTRY_URL = "https://registry.npmjs.org/@qwen-code/qwen-code/latest"
+    REGISTRY_URL = "https://registry.npmmirror.com/@qwen-code/qwen-code/latest"
     DEFAULT_VERSION = "0.0.10"
     CACHE_TTL = 3600
     REQUEST_TIMEOUT = 5

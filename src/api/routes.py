@@ -107,10 +107,18 @@ async def api_refresh_single_token(request: Request, auth: bool = Depends(check_
     if not token_id:
         raise HTTPException(400, "Missing tokenId")
     
+    logger.info(f"手动刷新单个token: {token_id}")
     token_manager.load_tokens()
     try:
-        return JSONResponse(await token_manager.refresh_single_token(token_id))
+        # 为手动刷新设置版本管理器
+        if _version_manager:
+            token_manager.set_version_manager(_version_manager)
+        
+        result = await token_manager.refresh_single_token(token_id)
+        logger.info(f"手动刷新token {token_id} 结果: {result}")
+        return JSONResponse(result)
     except Exception as e:
+        logger.error(f"手动刷新token {token_id} 失败: {e}", exc_info=True)
         return JSONResponse({'success': False, 'error': str(e)}, 500)
 
 @router.post("/delete-token")
@@ -261,23 +269,33 @@ async def _make_api_request_with_retry(session, url, json_data, headers, max_ret
     last_exception = None
     for attempt in range(max_retries):
         try:
+            logger.debug(f"API请求尝试 {attempt + 1}/{max_retries}")
             response = await session.post(url, json=json_data, headers=headers)
+            logger.debug(f"API请求成功，尝试次数: {attempt + 1}")
             return response
         except (asyncio.TimeoutError, aiohttp.ClientError) as e:
             last_exception = e
+            logger.debug(f"API请求失败，尝试 {attempt + 1}/{max_retries}，错误: {str(e)}")
             if attempt < max_retries - 1:
-                await asyncio.sleep(2 ** attempt)
+                sleep_time = 2 ** attempt
+                logger.debug(f"等待 {sleep_time} 秒后重试")
+                await asyncio.sleep(sleep_time)
                 continue
+            logger.error(f"API请求在 {max_retries} 次尝试后仍然失败: {str(e)}")
             raise last_exception
 
 async def handle_chat(data: Dict[str, Any], max_tool_calls: int = 10):
+    logger.debug(f"处理聊天请求: {data}")
     messages = data.get('messages', [])
     model = data.get('model', 'qwen3-coder-plus')
     stream = data.get('stream', False)
     tools = data.get('tools', [])
     tool_choice = data.get('tool_choice', 'auto')
     
+    logger.debug(f"请求参数 - model: {model}, stream: {stream}, tools: {len(tools)}, messages数量: {len(messages)}")
+    
     if not messages or not isinstance(messages, list):
+        logger.error("无效的消息格式")
         raise HTTPException(400, "Invalid messages")
 
     try:
@@ -286,13 +304,16 @@ async def handle_chat(data: Dict[str, Any], max_tool_calls: int = 10):
         encoding = tiktoken.encoding_for_model("gpt-4")
 
     prompt_tokens = sum(len(encoding.encode(str(msg.get('content', '')))) for msg in messages)
+    logger.debug(f"计算得到的提示tokens数量: {prompt_tokens}")
     token_manager.load_tokens()
     
     valid_token = await token_manager.get_valid_token()
     if not valid_token:
+        logger.error("没有有效的token可用")
         raise HTTPException(400, "No valid token")
     
     token_id, current_token = valid_token
+    logger.debug(f"选择的token ID: {token_id[:10]}...")
     session = await get_session()
     
     headers = {
@@ -324,8 +345,13 @@ async def handle_chat(data: Dict[str, Any], max_tool_calls: int = 10):
     
     while tool_call_count < max_tool_calls:
         try:
+            logger.debug(f"发送API请求到 {QWEN_API_ENDPOINT}")
+            logger.debug(f"请求头: {headers}")
+            logger.debug(f"请求体: {body}")
             response = await _make_api_request_with_retry(session, QWEN_API_ENDPOINT, body, headers)
+            logger.debug(f"收到API响应，状态码: {response.status}")
             if response.status != 200:
+                logger.error(f"API返回错误状态码: {response.status}")
                 raise HTTPException(500, f'API error: {response.status}')
         except (asyncio.TimeoutError, aiohttp.ClientError) as e:
             logger.error(f"API request failed after retries: {str(e)}")
@@ -348,6 +374,7 @@ async def handle_chat(data: Dict[str, Any], max_tool_calls: int = 10):
         
         if has_tool_calls:
             # 处理工具调用
+            logger.debug(f"检测到工具调用，工具数量: {len(tool_calls)}")
             tool_executor = get_tool_executor()
             choice = result['choices'][0]
             message = choice['message']
@@ -361,7 +388,9 @@ async def handle_chat(data: Dict[str, Any], max_tool_calls: int = 10):
             })
             
             # 执行工具调用
+            logger.debug(f"开始执行工具调用")
             tool_results = await tool_executor.execute_tool_calls(tool_calls)
+            logger.debug(f"工具调用执行完成，结果数量: {len(tool_results)}")
             
             # 添加工具结果到对话
             for tool_result in tool_results:
@@ -380,6 +409,7 @@ async def handle_chat(data: Dict[str, Any], max_tool_calls: int = 10):
                 db.update_token_usage(get_local_today_iso(), model, result['usage'].get('total_tokens', 0))
                 db.increment_token_usage_count(token_id)
             
+            logger.debug(f"没有工具调用，返回最终结果，结果包含choices: {'choices' in result}")
             return JSONResponse(result)
     
     # 达到最大工具调用次数
@@ -387,11 +417,13 @@ async def handle_chat(data: Dict[str, Any], max_tool_calls: int = 10):
         db.update_token_usage(get_local_today_iso(), model, result['usage'].get('total_tokens', 0))
         db.increment_token_usage_count(token_id)
     
+    logger.debug(f"达到最大工具调用次数或返回最终结果，结果包含choices: {'choices' in result}")
     return JSONResponse(result)
 
 
 async def _handle_stream_response(response, conversation_messages, token_id, model, encoding, prompt_tokens):
     """处理流式响应"""
+    logger.debug(f"开始处理流式响应，模型: {model}, token ID: {token_id[:10]}...")
     tool_executor = get_tool_executor()
     buffer = ""
     last_content = ""
@@ -435,9 +467,12 @@ async def _handle_stream_response(response, conversation_messages, token_id, mod
             yield buffer
             
         # 更新使用统计
+        logger.debug(f"流式响应处理完成，completion_text长度: {len(completion_text)}")
         if completion_text:
             tokens = len(encoding.encode(completion_text))
+            logger.debug(f"编码后的tokens数量: {tokens}")
             db.update_token_usage(get_local_today_iso(), model, prompt_tokens + tokens)
             db.increment_token_usage_count(token_id)
+            logger.debug(f"使用统计更新完成")
     
     return StreamingResponse(generate(), media_type="text/event-stream")
